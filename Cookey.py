@@ -608,3 +608,477 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if activation_status:
         start_message += "\n\n✅ Your account is activated!
+    else:
+        start_message += "\n\n❌ Your account is not activated. Use /activate YOUR_KEY to gain access."
+
+    keyboard = [
+        [
+            InlineKeyboardButton("Check Spotify", callback_data="check_spotify"),
+            InlineKeyboardButton("Check Netflix", callback_data="check_netflix")
+        ],
+        [InlineKeyboardButton("Channel", url=f"https://t.me/+NdidYpG9Bh8yZTY1")],
+        [InlineKeyboardButton("About", callback_data="about")]
+    ]
+
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.message.reply_text(start_message, reply_markup=reply_markup)
+
+async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    user_id = query.from_user.id
+    
+    
+    if query.data in ["check_spotify", "check_netflix"]:
+        if not is_user_activated(user_id):
+            await query.answer("Access restricted! Activate the bot first.")
+            await query.edit_message_text(
+                "⚠️ Access restricted! You need to activate the bot with a valid key.\n\n"
+                "Use /activate YOUR_KEY to activate your access.\n"
+                "If you don't have a key, please contact the bot owner."
+            )
+            return
+    
+    await query.answer()
+
+    formats_msg = "Supported: TXT, Netscape/JSON cookies, ZIP"
+    if HAVE_PY7ZR:
+        formats_msg += "/7Z"
+    if HAVE_RARFILE:
+        formats_msg += "/RAR"
+
+    if query.data == "check_spotify":
+        await query.edit_message_text(
+            f"Send your Spotify cookie file(s) to check.\n{formats_msg} archives supported.\n\n"
+            f"Please make sure you're sending Spotify cookies."
+        )
+        context.user_data["check_mode"] = "spotify"
+
+    elif query.data == "check_netflix":
+        await query.edit_message_text(
+            f"Send your Netflix cookie file(s) to check.\n{formats_msg} archives supported.\n\n"
+            f"Please make sure you're sending Netflix cookies."
+        )
+        context.user_data["check_mode"] = "netflix"
+
+    elif query.data == "about":
+        about_message = (
+            f"🍿 COOKIE CHECKER BOT 🍿\n\n"
+            f"This bot helps you verify Spotify and Netflix cookies and identify premium accounts.\n\n"
+            f"Version: {BOT_VERSION}\n"
+            f"Status: {BOT_STATUS}\n"
+            f"Owner: {BOT_OWNER}\n"
+            f"Updates: {BOT_CHANNEL}\n"
+            f"Developer: {BOT_DEVELOPER}\n\n"
+            f"Join our channel for more tools and updates!"
+        )
+
+        keyboard = [
+            [InlineKeyboardButton("Channel", url=f"https://t.me/{BOT_CHANNEL.replace('@', '')}")],
+            [InlineKeyboardButton("Back", callback_data="back_to_start")]
+        ]
+
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await query.edit_message_text(about_message, reply_markup=reply_markup)
+
+    elif query.data == "back_to_start":
+        user_first_name = query.from_user.first_name if query.from_user else None
+        start_message = generate_start_message(user_first_name)
+        
+        
+        if is_user_activated(user_id):
+            start_message += "\n\n✅ Your account is activated! You can use all bot features."
+        else:
+            start_message += "\n\n❌ Your account is not activated. Use /activate YOUR_KEY to gain access."
+
+        keyboard = [
+            [
+                InlineKeyboardButton("Check Spotify", callback_data="check_spotify"),
+                InlineKeyboardButton("Check Netflix", callback_data="check_netflix")
+            ],
+            [InlineKeyboardButton("Channel", url=f"https://t.me/{BOT_CHANNEL.replace('@', '')}")],
+            [InlineKeyboardButton("About", callback_data="about")]
+        ]
+
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await query.edit_message_text(start_message, reply_markup=reply_markup)
+
+async def process_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    
+    
+    if not is_user_activated(user_id):
+        await update.message.reply_text(
+            "⚠️ Access restricted! You need to activate the bot with a valid key.\n\n"
+            "Use /activate YOUR_KEY to activate your access.\n"
+            "If you don't have a key, please contact the bot owner."
+        )
+        return
+    
+    
+    check_mode = context.user_data.get("check_mode", "spotify")
+    processing_msg = await update.message.reply_text(f"Processing your {check_mode.capitalize()} cookie file(s)... Please wait.")
+
+    file = await context.bot.get_file(update.message.document.file_id)
+    file_name = update.message.document.file_name
+
+    if not (is_valid_file_type(file_name) or is_archive_file(file_name)):
+        await processing_msg.edit_text(
+            "❌ Your file is not supported. We only accept TXT and ZIP files only.\n\n"
+            "Please make sure you're uploading a valid cookie file or archive containing cookie files."
+        )
+        return
+
+    temp_dir = tempfile.mkdtemp()
+    file_path = os.path.join(temp_dir, file_name)
+    await file.download_to_drive(file_path)
+
+    results = {
+        "valid": [],
+        "invalid": 0,
+        "errors": 0,
+        "unsubscribed": 0
+    }
+
+    hit_file_path = os.path.join(temp_dir, f"{check_mode.capitalize()}_Hit.txt")
+    with open(hit_file_path, "w", encoding="utf-8") as hit_file:
+        hit_file.write(f"# {check_mode.upper()} COOKIE CHECKER RESULTS\n")
+        hit_file.write(f"# Created by {BOT_OWNER}\n\n")
+
+    extraction_dir = os.path.join(temp_dir, "extracted")
+    os.makedirs(extraction_dir, exist_ok=True)
+
+    summary = "Processing completed."
+
+    try:
+        if is_archive_file(file_name):
+            extraction_success = await extract_archive(file_path, extraction_dir, update, processing_msg)
+            
+            if not extraction_success:
+                shutil.rmtree(temp_dir)
+                return
+            
+            extracted_files = get_all_files(extraction_dir)
+            cookie_files = [f for f in extracted_files if is_valid_file_type(os.path.basename(f))]
+            total_files = len(cookie_files)
+            
+            if total_files == 0:
+                await processing_msg.edit_text(
+                    "❌ No potential cookie files found in the archive.\n\n"
+                    "Make sure your archive contains TXT or JSON cookie files. "
+                    "If your archive has nested folders, try organizing the files directly."
+                )
+                shutil.rmtree(temp_dir)
+                return
+            
+            await processing_msg.edit_text(f"Found {total_files} potential cookie files. Checking...")
+            
+            for idx, extracted_file in enumerate(cookie_files, 1):
+                if idx % 5 == 0:
+                    await processing_msg.edit_text(f"Checking: {idx}/{total_files} files...")
+                
+                file_content, is_text = safe_read_file(extracted_file)
+                if not is_text or file_content is None:
+                    continue
+                
+                file_basename = os.path.basename(extracted_file)
+                is_json = False
+                try:
+                    json.loads(file_content)
+                    is_json = True
+                except json.JSONDecodeError:
+                    is_json = False
+                except Exception:
+                    continue
+                
+                if check_mode == "spotify":
+                    result = await check_spotify_cookie_file(file_content, file_basename, is_json)
+                else:  # netflix
+                    result = await check_netflix_cookie_file(file_content, file_basename, is_json)
+                
+                if result["status"] == "valid":
+                    results["valid"].append(result)
+                    
+                    with open(hit_file_path, "a", encoding="utf-8") as hit_file:
+                        hit_file.write(f"\n{'='*50}\n")
+                        hit_file.write(f"FILE: {file_basename}\n")
+                        hit_file.write(f"PATH: {os.path.relpath(extracted_file, extraction_dir)}\n")
+                        
+                        if check_mode == "spotify":
+                            hit_file.write(f"PLAN: {result['plan']}\n")
+                            hit_file.write(f"COUNTRY: {result['country']}\n")
+                            hit_file.write(f"AUTO-PAY: {result['auto_pay']}\n")
+                            hit_file.write(f"TRIAL: {result['trial']}\n")
+                        else:  # netflix
+                            hit_file.write(f"PLAN: {result['plan']}\n")
+                            hit_file.write(f"COUNTRY: {result['country']}\n")
+                            hit_file.write(f"MEMBER SINCE: {result['member_since']}\n")
+                            hit_file.write(f"MAX STREAMS: {result['max_streams']}\n")
+                            hit_file.write(f"EXTRA MEMBERS: {result['extra_members']}\n")
+                        
+                        hit_file.write(f"{'='*50}\n\n")
+                        hit_file.write(result["formatted_content"])
+                        hit_file.write("\n\n")
+                
+                elif result["status"] == "invalid":
+                    results["invalid"] += 1
+                elif result["status"] == "unsubscribed":
+                    results["unsubscribed"] += 1
+                else:
+                    results["errors"] += 1
+        else:
+            file_content, is_text = safe_read_file(file_path)
+            if not is_text or file_content is None:
+                await processing_msg.edit_text(
+                    "❌ Your file is not supported. We only accept TXT and ZIP files only.\n\n"
+                    "The file you uploaded is not a valid text file. Please make sure you're "
+                    "uploading a proper cookie file in text format."
+                )
+                shutil.rmtree(temp_dir)
+                return
+            
+            is_json = False
+            try:
+                json.loads(file_content)
+                is_json = True
+            except json.JSONDecodeError:
+                is_json = False
+            except Exception:
+                await processing_msg.edit_text(
+                    "❌ File format not recognized.\n\n"
+                    "The file doesn't appear to be a valid cookie file. "
+                    "Please make sure you're uploading a proper Netscape or JSON cookie file."
+                )
+                shutil.rmtree(temp_dir)
+                return
+            
+            if check_mode == "spotify":
+                result = await check_spotify_cookie_file(file_content, file_name, is_json)
+            else:  # netflix
+                result = await check_netflix_cookie_file(file_content, file_name, is_json)
+            
+            if result["status"] == "valid":
+                results["valid"].append(result)
+                
+                with open(hit_file_path, "a", encoding="utf-8") as hit_file:
+                    hit_file.write(f"\n{'='*50}\n")
+                    hit_file.write(f"FILE: {file_name}\n")
+                    
+                    if check_mode == "spotify":
+                        hit_file.write(f"PLAN: {result['plan']}\n")
+                        hit_file.write(f"COUNTRY: {result['country']}\n")
+                        hit_file.write(f"AUTO-PAY: {result['auto_pay']}\n")
+                        hit_file.write(f"TRIAL: {result['trial']}\n")
+                    else:  # netflix
+                        hit_file.write(f"PLAN: {result['plan']}\n")
+                        hit_file.write(f"COUNTRY: {result['country']}\n")
+                        hit_file.write(f"MEMBER SINCE: {result['member_since']}\n")
+                        hit_file.write(f"MAX STREAMS: {result['max_streams']}\n")
+                        hit_file.write(f"EXTRA MEMBERS: {result['extra_members']}\n")
+                    
+                    hit_file.write(f"{'='*50}\n\n")
+                    hit_file.write(result["formatted_content"])
+            
+            elif result["status"] == "invalid":
+                results["invalid"] += 1
+            elif result["status"] == "unsubscribed":
+                results["unsubscribed"] += 1
+            else:
+                results["errors"] += 1
+        
+        if len(results["valid"]) == 0 and (results["invalid"] > 0 or results["errors"] > 0 or results["unsubscribed"] > 0):
+            summary = (
+                f"❌ No valid {check_mode.capitalize()} cookies found.\n\n"
+                f"Checked {results['invalid'] + results['errors'] + results['unsubscribed']} files:\n"
+                f"- Invalid cookies: {results['invalid']}\n"
+                f"- Unsubscribed accounts: {results['unsubscribed']}\n"
+                f"- Errors/Skipped: {results['errors']}\n\n"
+                f"Make sure you're uploading valid {check_mode.capitalize()} cookies."
+            )
+        elif sum([len(results["valid"]), results["invalid"], results["errors"], results["unsubscribed"]]) == 0:
+            summary = (
+                "❌ No cookies were processed.\n\n"
+                "Your file may not contain valid cookie data or may have an unsupported format. "
+                "Please make sure you're uploading proper cookie files."
+            )
+        else:
+            summary = f"✅ Done! Valid: {len(results['valid'])}, Invalid: {results['invalid']}, Unsubscribed: {results['unsubscribed']}, Errors: {results['errors']}"
+        
+        await processing_msg.edit_text(summary)
+        
+        if results["valid"]:
+            user = update.effective_user
+            user_name = user.first_name
+            if user.username:
+                user_mention = f"@{user.username}"
+            else:
+                user_mention = user.first_name
+            
+            if check_mode == "spotify":
+                plans_str, countries_str, autopay_count, trial_count = generate_spotify_stats(results["valid"])
+                
+                total_processed = len(results["valid"]) + results["invalid"] + results["errors"] + results["unsubscribed"]
+                
+                caption = (
+                    f"🎵 {len(results['valid'])} valid Spotify cookies\n"
+                    f"Plans: {plans_str}\n"
+                    f"Countries: {countries_str}\n"
+                    f"AutoPay: {autopay_count} | Trial: {trial_count}\n\n"
+                    f"🔰 Owner: {BOT_OWNER} | 👤 By: {user_mention}\n"
+                    f"📢 Channel: {BOT_CHANNEL}"
+                )
+            else:  # netflix
+                plans_str, countries_str, extra_members_count = generate_netflix_stats(results["valid"])
+                
+                total_processed = len(results["valid"]) + results["invalid"] + results["errors"] + results["unsubscribed"]
+                
+                caption = (
+                    f"🍿 {len(results['valid'])} valid Netflix cookies\n"
+                    f"Plans: {plans_str}\n"
+                    f"Countries: {countries_str}\n"
+                    f"Extra Members: {extra_members_count}\n\n"
+                    f"🔰 Owner: {BOT_OWNER} | 👤 By: {user_mention}\n"
+                    f"📢 Channel: {BOT_CHANNEL}"
+                )
+            
+            with open(hit_file_path, "rb") as hit_file:
+                await update.message.reply_document(
+                    document=hit_file,
+                    filename=f"{check_mode.capitalize()}_Hit.txt",
+                    caption=caption
+                )
+    
+    except Exception as e:
+        error_message = f"❌ An error occurred: {str(e)}\n\nPlease try again or contact {BOT_OWNER} for help."
+        await processing_msg.edit_text(error_message)
+    finally:
+        
+        try:
+            shutil.rmtree(temp_dir)
+        except Exception:
+            pass
+
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    formats = ["TXT files", "Netscape/JSON cookies", "ZIP archives"]
+    if HAVE_PY7ZR:
+        formats.append("7Z archives")
+    if HAVE_RARFILE:
+        formats.append("RAR archives")
+    
+    formats_list = ", ".join(formats)
+    
+    
+    user_id = update.effective_user.id
+    is_activated = is_user_activated(user_id)
+    activation_status = "✅ Activated" if is_activated else "❌ Not activated"
+    
+    help_text = (
+        f"🔍 Cookie Checker v{BOT_VERSION}\n\n"
+        f"Commands:\n"
+        f"/start - Start the bot\n"
+        f"/help - Show this help\n"
+        f"/activate [KEY] - Activate access\n\n"
+        f"Supported Formats: {formats_list}\n\n"
+        f"How to Use:\n"
+        f"1. Select Netflix or Spotify mode\n"
+        f"2. Send a cookie file or archive\n"
+        f"3. Wait for processing\n"
+        f"4. Get results in Hit.txt\n\n"
+        f"Bot Info:\n"
+        f"• Status: {BOT_STATUS}\n"
+        f"• Owner: {BOT_OWNER}\n"
+        f"• Channel: {BOT_CHANNEL}\n"
+        f"• Developer: {BOT_DEVELOPER}\n"
+        f"• Your Status: {activation_status}"
+    )
+    
+    keyboard = [
+        [InlineKeyboardButton("Channel", url=f"https://t.me/{BOT_CHANNEL.replace('@', '')}")],
+    ]
+    
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.message.reply_text(help_text, reply_markup=reply_markup)
+
+
+
+async def cmd_activate(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    
+    if is_user_activated(user_id):
+        await update.message.reply_text("✅ Your account is already activated!")
+        return
+    
+    if not context.args or len(context.args) != 1:
+        await update.message.reply_text(
+            "⚠️ Please provide a valid key.\n\n"
+            "Usage: /activate YOUR_KEY"
+        )
+        return
+    
+    key = context.args[0]
+    result = activate_user(user_id, key)
+    
+    if result == True:
+        await update.message.reply_text(
+            "🎉 Activation successful! You now have access to the bot services.\n\n"
+            "Use /start to begin using the bot."
+        )
+    elif result == "already_activated":
+        await update.message.reply_text("✅ Your account is already activated!")
+    else:
+        await update.message.reply_text(
+            "❌ Invalid key! The key may be expired, used up, or doesn't exist.\n\n"
+            "Please contact the bot owner for a valid key."
+        )
+
+async def cmd_add_key(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    
+    if user_id != ADMIN_ID:
+        await update.message.reply_text("❌ You don't have permission to use this command.")
+        return
+    
+    if not context.args or len(context.args) < 1 or len(context.args) > 3:
+        await update.message.reply_text(
+            "⚠️ Invalid format.\n\n"
+            "Usage: /addkey KEY [MAX_USES] [EXPIRY_DAYS]\n"
+            "Example: /addkey ABC123 5 30"
+        )
+        return
+    
+    key = context.args[0]
+    max_uses = int(context.args[1]) if len(context.args) > 1 else 1
+    expiry_days = int(context.args[2]) if len(context.args) > 2 else 30
+    
+    result = add_key(key, max_uses, expiry_days, f"admin_{user_id}")
+    
+    if result:
+        await update.message.reply_text(
+            f"✅ Key added successfully!\n\n"
+            f"Key: `{key}`\n"
+            f"Max Uses: {max_uses}\n"
+            f"Expires in: {expiry_days} days"
+        )
+    else:
+        await update.message.reply_text("❌ Failed to add key. The key might already exist.")
+
+async def cmd_delete_key(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    
+    if user_id != ADMIN_ID:
+        await update.message.reply_text("❌ You don't have permission to use this command.")
+        return
+    
+    if not context.args or len(context.args) != 1:
+        await update.message.reply_text(
+            "⚠️ Please provide a key to delete.\n\n"
+            "Usage: /delkey KEY"
+        )
+        return
+    
+    key = context.args[0]
+    result = delete_key(key)
+    
+    if result:
+        await update.message.reply_text(f
+                        
